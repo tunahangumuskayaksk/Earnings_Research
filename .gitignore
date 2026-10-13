@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+
+# Downloaded data cache. Delete it to force a fresh retrieval.
+cache/
