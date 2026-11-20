@@ -1,0 +1,14 @@
+.*
+!.gitignore
+_*/
+notes/
+*.ipynb
+!notebook/demo.ipynb
+output/
+data/*
+!data/.gitkeep
+!data/swagger.yaml
+!data/benchmark_spy.json
+!data/stock_universe.csv
+__pycache__/
+*.py[cod]

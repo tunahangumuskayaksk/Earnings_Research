@@ -1,0 +1,126 @@
+openapi: 3.0.3
+info:
+  title: IMP Earnings-Movements Data Dictionary
+  version: 1.0.0
+  description: |
+    Schema-only "swagger" for the IMP data layers. Not an HTTP API; paths are omitted.
+    Types/ranges/null counts were observed by running script/run_data.py,
+    script/run_feature.py and script/run_preprocess.py on the data in data/.
+    Layers: raw parquet (StockDaily, EarningsEvent, AnalystSentimentMonthly)
+    -> DailyPanel (df_all) -> EventRow (df) -> PreprocessedFeatures (train-only impute + scale).
+paths: {}
+components:
+  schemas:
+
+    # ------------------------------------------------------------------ RAW
+    StockDaily:
+      description: stock-data_us.parquet. Ticker x trading day. 242,507 rows, 200 TickerIds, 2020-01-02..2024-12-31. No duplicate (TickerId, Date). File is sorted newest-first per ticker.
+      type: object
+      required: [TickerId, ShortName, Date, LastPrice]
+      properties:
+        TickerId:        {type: integer, format: int64, description: Internal ticker id; join key to earnings. Range 1256..15733. }
+        ShortName:       {type: string, example: "ABNB:XNGS", description: "SYMBOL:MIC. 199 distinct values for 200 TickerIds (ANET:XNYS maps to TickerId 1418 and 15733)." }
+        InstrumentName:  {type: string, example: "AIRBNB INC-A", description: "Display name, truncated to ~16 chars. 200 distinct, 1 per TickerId." }
+        Date:            {type: string, format: date, description: Trading date. }
+        LastPrice:       {type: number, format: double, minimum: 1.598, maximum: 9924.4, description: "Close used for returns. Adjustment status unknown. Quoted in CurrencyId." }
+        Open:            {type: number, format: double, minimum: 1.582, maximum: 9914.17 }
+        High:            {type: number, format: double, minimum: 1.699, maximum: 9964.77, description: "Checked: High >= Low and Low <= LastPrice <= High on all rows." }
+        Low:             {type: number, format: double, minimum: 1.576, maximum: 9794.0 }
+        Volume:          {type: number, format: double, minimum: 100, maximum: 914081370, description: Shares traded (stored as float). }
+        CurrencyId:      {type: integer, enum: [840, 124], description: "840=USD (241,252 rows), 124=CAD (1,255 rows, only ARE:XTSE)." }
+        QScoreTrendLong: {type: number, nullable: true, minimum: -5, maximum: 5, description: "Trend score, multiples of 1/7. 102 nulls." }
+        QScoreSpeedLong: {type: number, nullable: true, minimum: -5, maximum: 5, description: "Speed/momentum score, multiples of 1/7. 102 nulls." }
+        QScoreLong:      {type: number, nullable: true, minimum: -10, maximum: 10, description: "Exactly QScoreTrendLong + QScoreSpeedLong (verified on every row), so it is redundant. 102 nulls." }
+        MarketCap:       {type: number, format: double, minimum: 93563604, maximum: 1.54e12, description: Market cap on that date, in CurrencyId units (assumed). }
+
+    EarningsEvent:
+      description: earnings_us.parquet. One row per announcement. 3,928 rows, 201 TickerIds, 2020-01-03..2024-12-19. No duplicate Id or (TickerId, EventDate).
+      type: object
+      required: [Id, TickerId, EventDate]
+      properties:
+        Id:           {type: integer, format: int64, description: Unique event id (672264..1489301). }
+        TickerId:     {type: integer, format: int64, description: "201 distinct; 16577 has no price rows (3 events)." }
+        EventDate:    {type: string, format: date, description: "Stored as STRING (object) in parquet, parsed to datetime64 by load_earnings. 11 events fall on weekends." }
+        MarketTimeId: {type: number, enum: [1, 2], description: "1=before open (1,745 rows), 2=after close (2,183 rows). Stored as float64; no nulls in raw." }
+
+    AnalystSentimentMonthly:
+      description: historical_sentiment_scores_us.parquet. Ticker x month analyst rating counts. 15,307 rows, dates 2019-01-01..2026-02-01, all month-start, no duplicate (symbol, date).
+      type: object
+      properties:
+        symbol:                   {type: string, example: "ABNB", description: "Join key (matches Symbol parsed from stock ShortName). 200 distinct." }
+        date:                     {type: string, format: date, description: Month-start snapshot. 2,770 rows are after 2024-12-31 and 2019 rows precede the price panel; neither is used. }
+        analystRatingsStrongBuy:  {type: integer, minimum: 0, maximum: 21 }
+        analystRatingsBuy:        {type: integer, minimum: 0, maximum: 47 }
+        analystRatingsHold:       {type: integer, minimum: 0, maximum: 28 }
+        analystRatingsSell:       {type: integer, minimum: 0, maximum: 11 }
+        analystRatingsStrongSell: {type: integer, minimum: 0, maximum: 5 }
+        ShortName_before:         {type: string, nullable: true, description: "5 nulls. Equals symbol wherever non-null, so it is not an alias." }
+        tickerId:                 {type: integer, format: int64, description: "Lowercase t. Mismatch with stock TickerId: stock 1418 and 1448 are absent here; sentiment has -1 and 16577 absent from stock." }
+
+    # ------------------------------------------------------------------ MERGED
+    DailyPanel:
+      description: "df_all = StockDaily + left join EarningsEvent on (Date,TickerId)=(EventDate,TickerId) + backward merge_asof of sentiment on Symbol/date (31-day tolerance). 242,507 rows x 28 cols."
+      allOf:
+        - $ref: '#/components/schemas/StockDaily'
+        - type: object
+          properties:
+            Id:           {type: number, nullable: true, description: "Populated on 3,841 rows (event days only)." }
+            EventDate:    {type: string, format: date, nullable: true, description: "3,841 non-null." }
+            MarketTimeId: {type: number, nullable: true }
+            Symbol:       {type: string, description: "Parsed from ShortName. 198 distinct." }
+            Exchange:     {type: string, enum: [XNYS, XNGS, XNAS, BATS, XNMS, XTSE], description: "Parsed from ShortName. Selects the trading calendar." }
+            symbol:       {type: string, nullable: true, description: "Sentiment merge key duplicate of Symbol. 20,186 nulls (no snapshot within 31 days)." }
+            date:         {type: string, format: date, nullable: true, description: "Snapshot date actually matched." }
+            analystRatingsStrongBuy:  {type: number, nullable: true }
+            analystRatingsBuy:        {type: number, nullable: true }
+            analystRatingsHold:       {type: number, nullable: true }
+            analystRatingsSell:       {type: number, nullable: true }
+            analystRatingsStrongSell: {type: number, nullable: true }
+            ShortName_before:         {type: string, nullable: true }
+            tickerId:                 {type: number, nullable: true }
+            BenchmarkAdjClose:        {type: number, description: "SPY adjusted close from Yahoo (cached under data/). Present during feature building only; not in df." }
+
+    EventRow:
+      description: "df = one row per earnings announcement. 3,837 rows x 26 cols, 200 tickers, EventDate 2020-01-14..2024-12-19, decision_session 2020-01-10..2024-12-17. Offsets: ANN [-1,+1], POST [+1,+5], DECISION -2 sessions from anchor."
+      type: object
+      properties:
+        # identity
+        TickerId:     {type: integer }
+        Symbol:       {type: string, description: 198 distinct. }
+        ShortName:    {type: string, description: 199 distinct. }
+        Id:           {type: number, description: Event id (float dtype). }
+        # calendar
+        EventDate:         {type: string, format: date, description: Original calendar date. }
+        release_session:   {type: string, format: date, description: "Session of the announcement; EventDate snapped forward if closed. Equals EventDate on all 3,837 rows." }
+        anchor_session:    {type: string, format: date, description: "t=0. MarketTimeId=1: release_session. MarketTimeId=2: next session. (verified 100%)" }
+        decision_session:  {type: string, format: date, description: "anchor_session - 2 sessions. Feature as-of date." }
+        MarketTimeId:      {type: number, enum: [1, 2], description: "1=BMO (1,700), 2=AMC (2,137)." }
+        # targets
+        ret_ann:      {type: number, nullable: true, minimum: -0.4514, maximum: 0.7557, description: "Stock return, close[anchor-2] -> close[anchor+1]. 3 nulls." }
+        ret_ann_mkt:  {type: number, nullable: true, minimum: -0.4649, maximum: 0.7185, description: "ret_ann minus SPY over the same window. Default target. 3 nulls; mean 0.0085, std 0.079." }
+        ret_next:     {type: number, nullable: true, minimum: -0.4066, maximum: 0.4627, description: "close[release_session] -> next session close. 2 nulls." }
+        ret_next_mkt: {type: number, nullable: true, minimum: -0.4178, maximum: 0.4549 }
+        ret_post:     {type: number, nullable: true, minimum: -0.3194, maximum: 0.4258, description: "close[anchor] -> close[anchor+5]. 4 nulls." }
+        ret_post_mkt: {type: number, nullable: true, minimum: -0.312, maximum: 0.3784 }
+        dir_ann:      {type: number, nullable: true, enum: [-1, 1], description: "sign(ret_ann_mkt). Observed only +1 (2,027) and -1 (1,807); 0 never occurs. 3 nulls." }
+        vol_ann:      {type: number, nullable: true, minimum: 0.0001, maximum: 0.2942, description: "Sample std (ddof=1) of daily returns in ANN window. 5 nulls." }
+        vol_post:     {type: number, nullable: true, minimum: 0.0016, maximum: 0.1823, description: "Same for POST window. 5 nulls." }
+        # features (decision_session values)
+        QScoreTrendLong:          {type: number, nullable: true, description: "1 null." }
+        QScoreSpeedLong:          {type: number, nullable: true, description: "1 null." }
+        QScoreLong:               {type: number, nullable: true, description: "1 null; equals Trend+Speed." }
+        analystRatingsStrongBuy:  {type: number, nullable: true, description: "335 nulls (8.7%), same for all five rating columns." }
+        analystRatingsBuy:        {type: number, nullable: true }
+        analystRatingsHold:       {type: number, nullable: true }
+        analystRatingsSell:       {type: number, nullable: true }
+        analystRatingsStrongSell: {type: number, nullable: true }
+
+    PreprocessedFeatures:
+      description: "run_preprocess output (TARGET=ret_ann_mkt, split on EventDate, TRAIN_END=2022-12-31, VAL_END=2023-12-31, impute=median, standardize=True). 3 rows dropped for null target. Fit on train only."
+      type: object
+      properties:
+        fold_sizes: {type: object, example: {train: 2266, val: 775, test: 793}, description: "Non-null targets: 2254 / 771 / 789. Train target mean 0.0073, std 0.0732." }
+        features:
+          type: array
+          description: "The 8 default FEATURE_COLUMNS. Train mean=0, std=1.0002, 0 missing after imputation. Val/test drift: QScoreSpeedLong mean -0.20/-0.29, analystRatingsStrongSell mean test +0.68 (std 1.97, max 11.6)."
+          items: {type: string, enum: [QScoreTrendLong, QScoreSpeedLong, QScoreLong, analystRatingsStrongBuy, analystRatingsBuy, analystRatingsHold, analystRatingsSell, analystRatingsStrongSell]}
